@@ -1,0 +1,6 @@
+.idea/
+*.iml
+.DS_Store
+build/
+local.properties
+docs/
