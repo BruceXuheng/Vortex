@@ -29,9 +29,32 @@ jobs:
         working-directory: vortex_app
         run: ./gradlew assembleDebug
 
+      - name: Decode keystore for Release build
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.VORTEX_APP }}" | base64 -d > vortex_app/secrets/vortex_app.jks
+
+      - name: Build Release APK
+        if: github.event_name == 'push'
+        working-directory: vortex_app
+        env:
+          KEYSTORE_PATH: secrets/vortex_app.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: vortex-debug-apk
           path: vortex_app/app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-release-apk
+          path: vortex_app/app/build/outputs/apk/release/*.apk
           retention-days: 30

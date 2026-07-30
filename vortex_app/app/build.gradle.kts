@@ -1,3 +1,6 @@
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -16,16 +19,26 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
-
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file(System.getenv("KEYSTORE_PATH") ?: "secrets/vortex_app.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: providers.gradleProperty("keystore.password").getOrElse("")
+            keyAlias = System.getenv("KEY_ALIAS") ?: providers.gradleProperty("keystore.alias").getOrElse("key0")
+            keyPassword = System.getenv("KEY_PASSWORD") ?: providers.gradleProperty("keystore.keyPassword").getOrElse("")
+        }
+    }
+
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+        }
         release {
-            optimization {
-                enable = false
-            }
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -34,6 +47,18 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+
+    /** 自定义 APK 输出文件名：vortex_app_{buildType}_v{versionName}_{date}.apk */
+    androidComponents {
+        onVariants { variant ->
+            variant.outputs.forEach { output ->
+                val date = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+                val buildType = variant.buildType ?: "unknown"
+                val version = variant.outputs.first().versionName.getOrElse("0.0.0")
+                output.outputFileName.set("vortex_app_${buildType}_v${version}_${date}.apk")
+            }
+        }
     }
 }
 
