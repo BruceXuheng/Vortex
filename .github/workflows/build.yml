@@ -1,10 +1,15 @@
-name: Build APK
+name: Build & Release APK
 
 on:
   push:
     branches: [ main ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main ]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -35,7 +40,6 @@ jobs:
           mkdir -p vortex_app/secrets
           printf '%s' "${{ secrets.VORTEX_APP }}" | base64 -d > vortex_app/secrets/vortex_app.jks
           echo "Keystore file size: $(wc -c < vortex_app/secrets/vortex_app.jks)"
-          file vortex_app/secrets/vortex_app.jks
 
       - name: Build Release APK
         if: github.event_name == 'push'
@@ -61,3 +65,12 @@ jobs:
           name: vortex-release-apk
           path: vortex_app/app/build/outputs/apk/release/*.apk
           retention-days: 30
+
+      - name: Publish to GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            vortex_app/app/build/outputs/apk/debug/*.apk
+            vortex_app/app/build/outputs/apk/release/*.apk
+          generate_release_notes: true
