@@ -32,6 +32,7 @@ jobs:
       - name: Decode keystore for Release build
         if: github.event_name == 'push'
         run: |
+          mkdir -p vortex_app/secrets
           echo "${{ secrets.VORTEX_APP }}" | base64 -d > vortex_app/secrets/vortex_app.jks
 
       - name: Build Release APK
