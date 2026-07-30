@@ -14,7 +14,11 @@ import com.vortex.ui.screens.home.HomeScreen
 import com.vortex.ui.screens.logdetail.LogDetailScreen
 import com.vortex.ui.theme.Vortex_appTheme
 
+/**
+ * 应用主 Activity，承载 Navigation 导航图。
+ */
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -26,7 +30,6 @@ class MainActivity : ComponentActivity() {
                     startDestination = VortexRoutes.HOME,
                     modifier = Modifier.fillMaxSize()
                 ) {
-
                     composable(VortexRoutes.HOME) {
                         HomeScreen(
                             onNavigateToLog = {
@@ -34,7 +37,6 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
-
                     composable(VortexRoutes.LOG_DETAIL_PAGE) {
                         LogDetailScreen(
                             onBack = {
@@ -42,7 +44,6 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
-
                 }
             }
         }

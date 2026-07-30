@@ -24,6 +24,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 
+/**
+ * 日志详情页。
+ *
+ * 使用深色背景，进入时将状态栏设为黑色，离开时恢复。
+ *
+ * @param modifier Modifier
+ * @param onBack 返回上一页的回调
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogDetailScreen(
@@ -32,7 +40,6 @@ fun LogDetailScreen(
 ) {
     val activity = LocalActivity.current
 
-    // 仅在此页面生效：进入时设黑，离开时恢复
     DisposableEffect(Unit) {
         activity?.window?.let { window ->
             @Suppress("DEPRECATION")
@@ -78,9 +85,7 @@ fun LogDetailScreen(
                 .padding(16.dp)
         ) {
             Text("这里展示单条日志的详细信息", fontSize = 14.sp, color = Color.White)
-
             Spacer(modifier = Modifier.height(8.dp))
-
             Text("更多内容待填充...", fontSize = 14.sp, color = Color.Gray)
         }
     }
