@@ -6,13 +6,15 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import com.vortex.R
+import java.io.IOException
 
 /**
  * Vortex VPN 前台服务。
  *
- * 负责建立 VPN 接口、管理生命周期，并通过广播向 ViewModel 报告状态变更。
- * 后续将在此处对接 relay server 进行流量转发。
+ * 负责建立 VPN 接口、管理生命周期，通过 [RelayConnection] 和 [PacketForwarder]
+ * 将流量转发到 PC 端 Relay Server，并通过广播向 ViewModel 报告状态变更。
  */
 class VortexVpnService : VpnService() {
 
@@ -23,12 +25,21 @@ class VortexVpnService : VpnService() {
         /** 停止 VPN 的 Action。 */
         const val ACTION_STOP_VPN = "com.vortex.action.STOP"
 
+        private const val TAG = "VortexVpnService"
         private const val NOTIFICATION_ID = 1
         private const val NOTIFICATION_CHANNEL_ID = "vortex_vpn"
     }
 
+    /** VPN 接口的文件描述符，用于读写 IP 包。 */
     private var vpnInterface: ParcelFileDescriptor? = null
+    /** 包转发器，负责 VPN fd 与 Relay Server 之间的双向 IP 包转发。 */
+    private var packetForwarder: PacketForwarder? = null
 
+    /**
+     * 处理启动/停止 VPN 的 Intent。
+     *
+     * @return START_STICKY 保证服务被杀后自动重启
+     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_VPN -> startVpn()
@@ -54,17 +65,35 @@ class VortexVpnService : VpnService() {
             ?: throw IllegalStateException("VPN 接口建立失败")
     }
 
-    /** 启动 VPN：显示前台通知、建立接口、广播状态。 */
+    /** 启动 VPN：显示前台通知、建立接口、启动转发、广播状态。 */
     private fun startVpn() {
         showForegroundNotification()
         try {
             vpnInterface = configureVpn()
+            startForwarding()
             broadcastState("CONNECTED")
         } catch (e: Exception) {
+            Log.e(TAG, "VPN 启动失败", e)
             broadcastState("ERROR", e.message)
             stopSelf()
         }
-        // TODO: 开始转发流量（后续对接 relay server）
+    }
+
+    /**
+     * 建立 Relay 连接并启动包转发。
+     *
+     * @throws IOException 连接 Relay Server 失败时抛出
+     */
+    private fun startForwarding() {
+        val relayConnection = RelayConnection()
+        val clientId = relayConnection.connect()
+        Log.d(TAG, "已连接 Relay Server，client_id = ${clientId.toLong() and 0xFFFFFFFFL}")
+
+        packetForwarder = PacketForwarder(vpnInterface!!, relayConnection) { errorMsg ->
+            Log.e(TAG, "转发异常: $errorMsg")
+            broadcastState("ERROR", errorMsg)
+        }
+        packetForwarder?.start()
     }
 
     /** 显示前台服务通知，满足 Android 前台服务要求。 */
@@ -98,8 +127,10 @@ class VortexVpnService : VpnService() {
         sendBroadcast(intent)
     }
 
-    /** 停止 VPN：关闭接口、移除通知、广播状态。 */
+    /** 停止 VPN：停止转发、关闭接口、移除通知、广播状态。 */
     private fun stopVpn() {
+        packetForwarder?.stop()
+        packetForwarder = null
         vpnInterface?.close()
         vpnInterface = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -107,7 +138,10 @@ class VortexVpnService : VpnService() {
         stopSelf()
     }
 
+    /** 服务销毁时清理转发器和 VPN 接口。 */
     override fun onDestroy() {
+        packetForwarder?.stop()
+        packetForwarder = null
         vpnInterface?.close()
         vpnInterface = null
         super.onDestroy()
