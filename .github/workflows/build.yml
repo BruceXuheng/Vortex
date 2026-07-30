@@ -33,7 +33,9 @@ jobs:
         if: github.event_name == 'push'
         run: |
           mkdir -p vortex_app/secrets
-          echo "${{ secrets.VORTEX_APP }}" | base64 -d > vortex_app/secrets/vortex_app.jks
+          printf '%s' "${{ secrets.VORTEX_APP }}" | base64 -d > vortex_app/secrets/vortex_app.jks
+          echo "Keystore file size: $(wc -c < vortex_app/secrets/vortex_app.jks)"
+          file vortex_app/secrets/vortex_app.jks
 
       - name: Build Release APK
         if: github.event_name == 'push'
