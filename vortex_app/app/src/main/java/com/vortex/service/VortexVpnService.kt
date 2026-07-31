@@ -55,6 +55,16 @@ class VortexVpnService : VpnService() {
         private const val TAG = "VortexVpnService"
         private const val NOTIFICATION_ID = 1
         private const val NOTIFICATION_CHANNEL_ID = "vortex_vpn"
+
+        /**
+         * VPN 是否正在运行（静态标志）。
+         *
+         * 供 [com.vortex.ui.screens.home.VpnViewModel] 在绑定广播时
+         * 主动查询当前状态，避免广播丢失导致 UI 不同步。
+         */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
     }
 
     /** VPN 接口的文件描述符，用于读写 IP 包。 */
@@ -70,7 +80,7 @@ class VortexVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_VPN -> {
-                if (isRunning) {
+                if (running) {
                     Log.d(TAG, "VPN 已在运行，忽略 START 请求")
                 } else {
                     val config = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -87,9 +97,9 @@ class VortexVpnService : VpnService() {
         return START_NOT_STICKY
     }
 
-    /** VPN 是否正在运行。 */
-    private val isRunning: Boolean
-        get() = vpnInterface != null
+    /** VPN 是否正在运行（委托给静态标志）。 */
+    private val running: Boolean
+        get() = isRunning
 
     /**
      * 配置并建立 VPN 接口。
@@ -146,6 +156,7 @@ class VortexVpnService : VpnService() {
     /** 启动 VPN：显示前台通知、建立接口、启动转发、广播状态。 */
     private fun startVpn(config: VpnConfiguration) {
         showForegroundNotification()
+        isRunning = true
         try {
             vpnInterface = configureVpn(config)
             startForwarding()
@@ -241,7 +252,8 @@ class VortexVpnService : VpnService() {
 
     /** 关闭 VPN：停止转发、关闭接口、移除通知、广播状态。 */
     private fun closeVpn() {
-        if (!isRunning) return
+        if (!running) return
+        isRunning = false
 
         try {
             packetForwarder?.stop()

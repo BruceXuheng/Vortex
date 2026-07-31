@@ -80,21 +80,31 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 处理来自 ADB `am start` 的 START/STOP Intent。
+     * 处理 Activity 启动 Intent。
      *
-     * 对齐 Gnirehtet：
-     * - START 时从 extras 提取 dnsServers/routes 参数
-     * - 检查 VPN 授权状态，未授权则请求用户确认
-     * - STOP 时直接停止 VPN
+     * 启动逻辑：
+     * - `ACTION_STOP_VPN`：停止 VPN
+     * - `ACTION_START_VPN`：从 extras 提取参数后启动 VPN
+     * - 默认启动（桌面图标 / 无特定 Action）：自动连接 VPN
+     *
+     * 已在运行时忽略重复 START 请求。
      */
     private fun handleIntent(intent: Intent?) {
         when (intent?.action) {
-            VortexVpnService.ACTION_START_VPN -> {
-                val config = createConfig(intent)
-                startVpn(config)
-            }
             VortexVpnService.ACTION_STOP_VPN -> {
                 stopVpn()
+            }
+            VortexVpnService.ACTION_START_VPN -> {
+                if (!VortexVpnService.isRunning) {
+                    val config = createConfig(intent)
+                    startVpn(config)
+                }
+            }
+            else -> {
+                // 默认启动（桌面图标等），自动连接 VPN
+                if (!VortexVpnService.isRunning) {
+                    startVpn(VpnConfiguration())
+                }
             }
         }
     }

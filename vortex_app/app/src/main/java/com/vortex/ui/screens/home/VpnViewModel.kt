@@ -59,6 +59,9 @@ class VpnViewModel : ViewModel() {
      * 在 Composable 的 [LaunchedEffect] 中调用，注册 BroadcastReceiver 监听
      * [VortexVpnService] 发出的状态变更广播。
      *
+     * 注册完成后主动查询 [VortexVpnService.isRunning] 同步当前状态，
+     * 解决 ADB 启动 VPN 时广播早于 Receiver 注册导致 UI 不同步的问题。
+     *
      * @param context 用于注册 BroadcastReceiver 的 Context
      */
     fun bindServiceState(context: Context) {
@@ -87,6 +90,12 @@ class VpnViewModel : ViewModel() {
             IntentFilter("com.vortex.VPN_STATE_CHANGED"),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+
+        // 主动同步 Service 当前状态，避免广播丢失
+        if (VortexVpnService.isRunning) {
+            _vpnState.value = VpnState.CONNECTED
+            _isBusy.value = false
+        }
     }
 
     /**
