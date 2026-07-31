@@ -4,6 +4,8 @@
 
     <!-- 网络通信 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 查询网络状态（VpnService.configure 需要设置 underlying network） -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- VPN 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Android 14+ 前台服务类型：特殊用途 -->

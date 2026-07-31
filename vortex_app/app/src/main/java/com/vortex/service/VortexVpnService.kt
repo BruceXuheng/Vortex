@@ -243,6 +243,7 @@ class VortexVpnService : VpnService() {
      * @param message 附加信息，如错误描述
      */
     private fun broadcastState(state: String, message: String? = null) {
+        Log.i(TAG, "broadcastState: state=$state, message=$message")
         val intent = Intent("com.vortex.VPN_STATE_CHANGED").apply {
             putExtra("state", state)
             message?.let { putExtra("message", it) }

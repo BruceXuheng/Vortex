@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.VpnService
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -32,6 +33,10 @@ import kotlinx.coroutines.launch
  * - Service → ViewModel：通过 BroadcastReceiver 接收状态广播
  */
 class VpnViewModel : ViewModel() {
+
+    companion object {
+        private const val TAG = "VpnViewModel"
+    }
 
     /**
      * VPN 连接状态。
@@ -88,6 +93,7 @@ class VpnViewModel : ViewModel() {
         // ViewModel 自行消费 actionFlow，彻底消除回调时序问题
         viewModelScope.launch {
             actionFlow.collect { action ->
+                Log.i(TAG, "actionFlow.collect: action=$action, receiverContext=$receiverContext")
                 // context 可能还没准备好，缓存等 executeAction 调用时处理
                 queuedAction = action
                 tryExecuteQueuedAction()
@@ -104,7 +110,9 @@ class VpnViewModel : ViewModel() {
      * @param config VPN 配置
      */
     fun dispatch(action: String?, config: VpnConfiguration? = null) {
-        _actionFlow.tryEmit(VpnAction(action, config))
+        Log.i(TAG, "dispatch: action=$action, config=$config")
+        val emitted = _actionFlow.tryEmit(VpnAction(action, config))
+        Log.i(TAG, "dispatch: tryEmit result=$emitted")
     }
 
     /**
@@ -117,10 +125,13 @@ class VpnViewModel : ViewModel() {
      * @param context 用于注册 BroadcastReceiver 和启动 Service 的 Context
      */
     fun bindServiceState(context: Context) {
+        Log.i(TAG, "bindServiceState: called, isRunning=${VortexVpnService.isRunning}")
         receiverContext = context
         receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
-                when (intent.getStringExtra("state")) {
+                val state = intent.getStringExtra("state")
+                Log.i(TAG, "onReceive: state=$state")
+                when (state) {
                     "CONNECTED" -> {
                         _vpnState.value = VpnState.CONNECTED
                         _isBusy.value = false
@@ -172,14 +183,18 @@ class VpnViewModel : ViewModel() {
      * @param config VPN 配置参数
      */
     fun startVpn(context: Context, config: VpnConfiguration) {
+        Log.i(TAG, "startVpn: isRunning=${VortexVpnService.isRunning}, config=$config")
         if (VortexVpnService.isRunning) return
         _isBusy.value = true
+        Log.i(TAG, "startVpn: isBusy set to true")
         val prepareIntent = VpnService.prepare(context)
         if (prepareIntent != null) {
+            Log.i(TAG, "startVpn: VPN permission required, pendingConfig set")
             pendingConfig = config
             _prepareIntent.value = prepareIntent
             return
         }
+        Log.i(TAG, "startVpn: VPN already authorized, launching service")
         launchVpnService(context, config)
     }
 
@@ -219,6 +234,7 @@ class VpnViewModel : ViewModel() {
     }
 
     private fun launchVpnService(context: Context, config: VpnConfiguration = VpnConfiguration()) {
+        Log.i(TAG, "launchVpnService: starting VortexVpnService")
         val intent = Intent(context, VortexVpnService::class.java).apply {
             action = VortexVpnService.ACTION_START_VPN
             putExtra(VortexVpnService.EXTRA_VPN_CONFIGURATION, config)
@@ -230,6 +246,7 @@ class VpnViewModel : ViewModel() {
     private fun tryExecuteQueuedAction() {
         val action = queuedAction ?: return
         val ctx = receiverContext ?: return
+        Log.i(TAG, "tryExecuteQueuedAction: executing action=$action")
         queuedAction = null
         when (action.action) {
             VortexVpnService.ACTION_STOP_VPN -> stopVpn(ctx)

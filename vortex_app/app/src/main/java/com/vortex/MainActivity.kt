@@ -2,6 +2,7 @@ package com.vortex
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -27,6 +28,10 @@ import java.net.InetAddress
  * `com.vortex.action.STOP` Intent，通过 [VpnViewModel.dispatch] 委托给 ViewModel 处理。
  */
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     private val viewModel = VpnViewModel()
 
@@ -79,6 +84,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleIntent(intent: Intent?) {
         val action = intent?.action
+        Log.i(TAG, "handleIntent: action=$action, intent=$intent")
         when (action) {
             VortexVpnService.ACTION_STOP_VPN -> {
                 viewModel.dispatch(action)
