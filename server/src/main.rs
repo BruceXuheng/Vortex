@@ -1,0 +1,68 @@
+use clap::Parser;
+use vortex::cli::Cli;
+use vortex::cli::Commands;
+use vortex::adb::Adb;
+
+fn main() {
+    // 初始化日志
+    env_logger::init();
+
+    let cli = Cli::parse();
+    let adb = Adb::new(cli.serial.clone());
+
+    if let Err(e) = run_command(&cli.command, &adb) {
+        eprintln!("错误: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// 根据子命令执行对应操作。
+fn run_command(command: &Commands, adb: &Adb) -> Result<(), String> {
+    match command {
+        Commands::Run => run_all(adb),
+        Commands::Relay => run_relay(),
+        Commands::Install => adb.install("vortex_app.apk"),
+        Commands::Start => run_start(adb),
+        Commands::Stop => run_stop(adb),
+        Commands::Tunnel => adb.reverse(),
+    }
+}
+
+/// `vortex run`：一键运行全部流程。
+///
+/// 顺序：安装 APK → 建隧道 → 启动 VPN → 启动 Relay
+fn run_all(adb: &Adb) -> Result<(), String> {
+    log::info!("=== Vortex 一键启动 ===");
+
+    // 1. 安装 APK
+    adb.install("vortex_app.apk")?;
+
+    // 2. 建立反向隧道
+    adb.reverse()?;
+
+    // 3. 启动 VPN
+    adb.start_vpn()?;
+
+    // 4. 启动 Relay 服务器
+    run_relay()
+}
+
+/// `vortex start`：建隧道 + 启动 VPN。
+fn run_start(adb: &Adb) -> Result<(), String> {
+    adb.reverse()?;
+    adb.start_vpn()
+}
+
+/// `vortex stop`：停止 VPN + 移除隧道。
+fn run_stop(adb: &Adb) -> Result<(), String> {
+    adb.stop_vpn()?;
+    adb.reverse_remove()
+}
+
+/// `vortex relay`：启动中继服务器。
+fn run_relay() -> Result<(), String> {
+    log::info!("Relay 服务器启动中...");
+    println!("Vortex Relay 正在运行，按 Ctrl+C 退出");
+    vortex::relay::tunnel_server::Relay::run()
+        .map_err(|e| format!("Relay 运行失败: {e}"))
+}
