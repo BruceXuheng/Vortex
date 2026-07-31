@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 /// 编译时嵌入的 APK 数据。
 ///
-/// `build.rs` 在编译前将 APK 拷贝到 `target/vortex_app.apk`，
+/// `build.rs` 将 APK 拷贝到 `OUT_DIR/vortex_app.apk`，
+/// 通过 `cargo:rustc-env=VORTEX_APK_PATH` 传递路径，
 /// 此处通过 `include_bytes!` 在编译时将其嵌入二进制。
 ///
 /// 如果编译时未找到 APK，嵌入空字节切片，
 /// `extract()` 会返回错误提示先构建 Android 项目。
-const APK_DATA: &[u8] = include_bytes!("../target/vortex_app.apk");
+const APK_DATA: &[u8] = include_bytes!(env!("VORTEX_APK_PATH"));
 
 /// 将嵌入的 APK 写入临时文件，返回路径。
 ///

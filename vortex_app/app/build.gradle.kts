@@ -62,6 +62,25 @@ android {
     }
 }
 
+/** 构建完成后将 APK 拷贝到项目根 output/ 目录，统一产物输出位置。 */
+tasks.register("copyApkToOutput") {
+    group = "build"
+    description = "将 Release APK 拷贝到 output/ 目录"
+    dependsOn("assembleRelease")
+
+    val apkDir = layout.projectDirectory.dir("build/outputs/apk/release")
+    val outputDir = layout.projectDirectory.dir("../../output")
+
+    doLast {
+        outputDir.asFile.mkdirs()
+        apkDir.asFile.listFiles()?.filter { it.extension == "apk" }?.forEach { apk ->
+            val dest = File(outputDir.asFile, apk.name)
+            apk.copyTo(dest, overwrite = true)
+            logger.lifecycle("APK 已拷贝到: ${dest.absolutePath}")
+        }
+    }
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
