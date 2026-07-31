@@ -30,6 +30,9 @@ class MainActivity : ComponentActivity() {
     /** 由 HomeScreen 设置，将 Intent 事件转发给 ViewModel。 */
     var onIntentAction: ((action: String?, config: VpnConfiguration?) -> Unit)? = null
 
+    /** handler 注册前缓存的 pending action，注册后自动补发。 */
+    private var pendingAction: Pair<String?, VpnConfiguration?>? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -46,7 +49,12 @@ class MainActivity : ComponentActivity() {
                             onNavigateToLog = {
                                 navController.navigate(VortexRoutes.LOG_DETAIL_PAGE)
                             },
-                            onActionReady = { handler -> onIntentAction = handler }
+                            onActionReady = { handler ->
+                                onIntentAction = handler
+                                // handler 就绪后补发缓存的 pending action
+                                pendingAction?.let { handler(it.first, it.second) }
+                                pendingAction = null
+                            }
                         )
                     }
                     composable(VortexRoutes.LOG_DETAIL_PAGE) {
@@ -70,24 +78,26 @@ class MainActivity : ComponentActivity() {
     /**
      * 处理 Activity 启动 Intent，统一委托给 ViewModel。
      *
+     * 若 handler 尚未注册（首次 onCreate 时 LaunchedEffect 还未执行），
+     * 将 action 缓存到 [pendingAction]，等 handler 就绪后自动补发。
+     *
      * - `ACTION_STOP_VPN`：停止 VPN
      * - `ACTION_START_VPN`：提取 extras 参数后启动 VPN
      * - 默认启动（桌面图标等）：自动连接 VPN
      */
     private fun handleIntent(intent: Intent?) {
         val action = intent?.action
-        when (action) {
-            VortexVpnService.ACTION_STOP_VPN -> {
-                onIntentAction?.invoke(action, null)
-            }
-            VortexVpnService.ACTION_START_VPN -> {
-                val config = createConfig(intent)
-                onIntentAction?.invoke(action, config)
-            }
-            else -> {
-                // 默认启动（桌面图标等），自动连接 VPN
-                onIntentAction?.invoke(VortexVpnService.ACTION_START_VPN, VpnConfiguration())
-            }
+        val pair = when (action) {
+            VortexVpnService.ACTION_STOP_VPN -> action to null
+            VortexVpnService.ACTION_START_VPN -> action to createConfig(intent)
+            else -> VortexVpnService.ACTION_START_VPN to VpnConfiguration()
+        }
+
+        if (onIntentAction != null) {
+            onIntentAction!!.invoke(pair.first, pair.second)
+        } else {
+            // handler 未就绪，缓存等待补发
+            pendingAction = pair
         }
     }
 
