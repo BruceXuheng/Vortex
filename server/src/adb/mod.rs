@@ -1,5 +1,18 @@
 use std::process::Command;
 
+/// Vortex Android 应用的基础包名。
+///
+/// debug 构建会添加 `.debug` 后缀（由 Gradle `applicationIdSuffix` 控制），
+/// release 构建使用基础包名。
+const PACKAGE_BASE: &str = "com.vortex";
+
+/// Activity 和 Service 的实际类名全限定路径。
+///
+/// 注意：applicationId 只改变 Manifest 中的包标识，不改变 Java/Kotlin 类的包名。
+/// 因此 `.MainActivity` 缩写在 debug 包下会展开为 `com.vortex.debug.MainActivity`（错误），
+/// 必须使用完整类名 `com.vortex.MainActivity`。
+const ACTIVITY_CLASS: &str = "com.vortex.MainActivity";
+
 /// ADB 命令封装。
 ///
 /// 所有 ADB 操作都通过调用系统 `adb` 完成。
@@ -22,13 +35,43 @@ impl Adb {
         cmd
     }
 
+    /// 检测设备上安装的 Vortex 包名。
+    ///
+    /// 优先匹配 release 包名 `com.vortex`，其次匹配 debug 包名 `com.vortex.debug`。
+    /// 如果都未安装，返回 release 包名（后续操作会报错）。
+    fn detect_package(&self) -> String {
+        let output = self.command()
+            .arg("shell")
+            .arg("pm")
+            .arg("list")
+            .arg("packages")
+            .output();
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // 优先匹配 release 包
+            if stdout.contains(&format!("package:{PACKAGE_BASE}\n")) {
+                return PACKAGE_BASE.to_string();
+            }
+            // 其次匹配 debug 包
+            if stdout.contains(&format!("package:{PACKAGE_BASE}.debug\n")) {
+                return format!("{PACKAGE_BASE}.debug");
+            }
+        }
+
+        // 默认返回 release 包名
+        PACKAGE_BASE.to_string()
+    }
+
     /// 安装 APK 到设备。
     ///
-    /// 使用 `-r` 参数覆盖安装。
+    /// 使用 `-r -g -d` 参数覆盖安装、授予权限、允许降级。
     pub fn install(&self, apk_path: &str) -> Result<(), String> {
         let status = self.command()
             .arg("install")
             .arg("-r")
+            .arg("-g")
+            .arg("-d")
             .arg(apk_path)
             .status()
             .map_err(|e| format!("执行 adb install 失败: {e}"))?;
@@ -81,21 +124,28 @@ impl Adb {
 
     /// 启动 VPN 服务。
     ///
-    /// 通过 `am startservice` 发送 `com.vortex.action.START` Intent，
-    /// 触发 VortexVpnService 建立 VPN 接口。
+    /// 通过 `am start` 发送 `com.vortex.action.START` Intent 到 Activity，
+    /// 由 Activity 内部启动 VortexVpnService。
+    ///
+    /// 不能直接用 `am startservice` 启动 VpnService：
+    /// VpnService 声明了 `BIND_VPN_SERVICE` 系统权限保护，
+    /// ADB shell 没有该权限，跨 UID 调用会被拒绝。
     pub fn start_vpn(&self) -> Result<(), String> {
+        let package = self.detect_package();
+        let component = format!("{package}/{ACTIVITY_CLASS}");
+
         let status = self.command()
             .arg("shell")
             .arg("am")
-            .arg("startservice")
+            .arg("start")
             .arg("-a")
             .arg("com.vortex.action.START")
-            .arg("com.vortex/.service.VortexVpnService")
+            .arg(&component)
             .status()
             .map_err(|e| format!("启动 VPN 失败: {e}"))?;
 
         if status.success() {
-            log::info!("VPN 服务已启动");
+            log::info!("VPN 服务已启动 (package={package})");
             Ok(())
         } else {
             Err(format!("启动 VPN 失败，退出码: {:?}", status.code()))
@@ -103,19 +153,25 @@ impl Adb {
     }
 
     /// 停止 VPN 服务。
+    ///
+    /// 通过 `am start` 发送 `com.vortex.action.STOP` Intent 到 Activity，
+    /// 由 Activity 内部停止 VortexVpnService。
     pub fn stop_vpn(&self) -> Result<(), String> {
+        let package = self.detect_package();
+        let component = format!("{package}/{ACTIVITY_CLASS}");
+
         let status = self.command()
             .arg("shell")
             .arg("am")
-            .arg("startservice")
+            .arg("start")
             .arg("-a")
             .arg("com.vortex.action.STOP")
-            .arg("com.vortex/.service.VortexVpnService")
+            .arg(&component)
             .status()
             .map_err(|e| format!("停止 VPN 失败: {e}"))?;
 
         if status.success() {
-            log::info!("VPN 服务已停止");
+            log::info!("VPN 服务已停止 (package={package})");
             Ok(())
         } else {
             Err(format!("停止 VPN 失败，退出码: {:?}", status.code()))

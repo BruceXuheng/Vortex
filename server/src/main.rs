@@ -4,7 +4,10 @@ use vortex::cli::Commands;
 use vortex::adb::Adb;
 
 fn main() {
-    // 初始化日志
+    // 初始化日志——默认 info 级别，可通过 RUST_LOG 环境变量覆盖
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     env_logger::init();
 
     let cli = Cli::parse();
