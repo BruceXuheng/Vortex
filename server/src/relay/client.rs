@@ -16,13 +16,18 @@ use std::rc::Rc;
 ///
 /// 当连接需要回传数据给 Android 时，不能直接 borrow Client（因为
 /// Router 已经借用了 Client）。ClientChannel 持有 Client 内部
-/// buffer 和 interest 的可变引用，让连接可以安全地写入数据。
+/// buffer、stream 指针和 interest 的可变引用，让连接可以安全地写入数据。
 ///
-/// 注意：ClientChannel 不持有 stream 引用，不能直接调用 reregister。
-/// 它通过修改 `interests` 字段标记需要更新，Client 在 process 结束后
-/// 统一执行 reregister。
+/// 对齐 Gnirehtet：`send_to_client()` 后立即调用 `update_interests()` → `reregister()`，
+/// 确保 Client 及时注册 WRITABLE interest，数据能立即写出。
+///
+/// 由于 mio 0.8 的 `reregister` 要求 `&mut dyn Source`，而 ClientChannel 无法
+/// 获取 `&mut TcpStream`（与 Client 的其他字段 borrow 冲突），这里使用原始指针
+/// 保存 stream 地址，在 `update_interests` 时通过 `Selector::reregister_raw` 调用。
+/// 在 Vortex 的单线程 RC 模型下，这是安全的。
 pub struct ClientChannel<'a> {
     network_to_client: &'a mut StreamBuffer,
+    stream_ptr: *const TcpStream,
     token: Token,
     interests: &'a mut Interest,
 }
@@ -30,29 +35,32 @@ pub struct ClientChannel<'a> {
 impl<'a> ClientChannel<'a> {
     fn new(
         network_to_client: &'a mut StreamBuffer,
+        stream: &TcpStream,
         token: Token,
         interests: &'a mut Interest,
     ) -> Self {
         Self {
             network_to_client,
+            stream_ptr: stream as *const TcpStream,
             token,
             interests,
         }
     }
 
-    /// 将 IP 包数据写入回传缓冲区并标记 interest 更新。
+    /// 将 IP 包数据写入回传缓冲区并立即更新 interest。
+    ///
+    /// 对齐 Gnirehtet：写入后立即调用 `update_interests()` → `reregister()`，
+    /// 确保 Client 被注册为 WRITABLE，数据能在下次 poll 时写出。
     ///
     /// 返回 Err(WouldBlock) 表示 Client 缓冲区已满，需要背压处理。
-    ///
-    /// 注意：`_selector` 参数未使用，保留是为了与 Gnirehtet API 签名对齐。
     pub fn send_to_client(
         &mut self,
-        _selector: &mut Selector,
+        selector: &mut Selector,
         ipv4_packet: &[u8],
     ) -> io::Result<()> {
         if ipv4_packet.len() <= self.network_to_client.remaining() {
             self.network_to_client.read_from(ipv4_packet);
-            self.mark_interests_update();
+            self.update_interests(selector);
             Ok(())
         } else {
             log::warn!("Client 缓冲区已满");
@@ -60,15 +68,26 @@ impl<'a> ClientChannel<'a> {
         }
     }
 
-    /// 标记 interest 需要更新（脏标记机制）。
+    /// 更新 Client 的 interest 注册。
     ///
-    /// 将 interests 强制设为 READABLE，制造一个与实际需求不匹配的值。
-    /// 下次 update_interests() 计算出正确值（buffer 非空时为 READABLE|WRITABLE）
-    /// 时，会发现两者不同，从而触发 reregister。
-    ///
-    /// 本质上这是一个"脏标记"：告诉 Client "interest 可能过时了，请重新计算"。
-    fn mark_interests_update(&mut self) {
-        *self.interests = Interest::READABLE;
+    /// 对齐 Gnirehtet：缓冲区非空时注册 WRITABLE，确保数据能写出。
+    fn update_interests(&mut self, selector: &mut Selector) {
+        let ready = if self.network_to_client.is_empty() {
+            Interest::READABLE
+        } else {
+            Interest::READABLE | Interest::WRITABLE
+        };
+        if *self.interests != ready {
+            *self.interests = ready;
+            // SAFETY: stream_ptr 来自 Client 的 &self.stream，在 ClientChannel 的
+            // 生命周期内 Client 仍然存活且无其他可变引用。reregister 只修改 poll
+            // 注册状态，不修改 TcpStream 内部数据。
+            unsafe {
+                selector
+                    .reregister_raw(self.stream_ptr, self.token, ready)
+                    .expect("无法重新注册到 poll");
+            }
+        }
     }
 
     /// 获取 token。
@@ -176,9 +195,12 @@ impl Client {
     }
 
     /// 创建 ClientChannel（用于连接回传数据）。
+    ///
+    /// 对齐 Gnirehtet：ClientChannel 可在 send_to_client 后立即 reregister。
     pub fn channel(&mut self) -> ClientChannel<'_> {
         ClientChannel::new(
             &mut self.network_to_client,
+            &self.stream,
             self.token,
             &mut self.interests,
         )
@@ -325,11 +347,21 @@ impl Client {
     }
 
     /// 推送一个 IP 包给 Router。
+    ///
+    /// 对齐 Gnirehtet：提前创建 ClientChannel，传入 Router → Connection，
+    /// 让 Connection 可直接回传控制包（SYN+ACK、FIN+ACK、RST），
+    /// 避免 Connection 二次 borrow Client 的 RefCell。
     fn push_one_packet_to_network(&mut self, selector: &mut Selector) -> bool {
         match self.client_to_network.as_ipv4_packet() {
             Some(ref packet) => {
                 let raw = packet.raw().to_vec();
-                self.router.send_to_network(selector, &raw);
+                let mut client_channel = ClientChannel::new(
+                    &mut self.network_to_client,
+                    &self.stream,
+                    self.token,
+                    &mut self.interests,
+                );
+                self.router.send_to_network(selector, &mut client_channel, &raw);
                 true
             }
             None => false,

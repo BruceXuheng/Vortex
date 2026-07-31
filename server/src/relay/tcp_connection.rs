@@ -29,6 +29,12 @@ const MAX_PAYLOAD_LENGTH: u16 = MTU - 20 - 20;
 /// - 跳过 CloseWait: Established 收到 FIN 后直接到 LastAck
 /// - may_read/may_write 动态决定 interest
 /// - PacketSource 实现用于背压
+///
+/// **ClientChannel 传递机制**（对齐 Gnirehtet）：
+/// - `send_to_network()` 由 Client 在 `push_one_packet_to_network` 中调用，
+///   ClientChannel 在 Client 侧提前创建并传入，避免二次 borrow Client 的 RefCell
+/// - `on_ready()` 由 Selector 直接调用，此时 Client 的 RefCell 未被 borrow，
+///   Connection 可安全通过 `with_client_channel()` 创建 ClientChannel
 pub struct TcpConnection {
     /// 自身弱引用（用于注册为 PacketSource 时避免循环引用）。
     self_weak: Weak<RefCell<TcpConnection>>,
@@ -94,19 +100,6 @@ enum TcpState {
     Closing,
 }
 
-impl TcpState {
-    fn is_connected(&self) -> bool {
-        !matches!(self, TcpState::Init | TcpState::SynSent | TcpState::SynReceived)
-    }
-
-    fn is_closed(&self) -> bool {
-        matches!(
-            self,
-            TcpState::FinWait1 | TcpState::FinWait2 | TcpState::LastAck | TcpState::Closing
-        )
-    }
-}
-
 impl Tcb {
     fn new() -> Self {
         Self {
@@ -158,7 +151,6 @@ impl TcpConnection {
 
         let stream = Self::create_stream(&id)?;
 
-        let packet = Ipv4Packet::new(syn_packet);
         let reference_packet = syn_packet.to_vec();
 
         // 初始 interest 为 WRITABLE（等待连接完成）
@@ -194,11 +186,10 @@ impl TcpConnection {
             self_ref.network_to_client.set_reference_packet(&reference_packet);
         }
 
-        // 处理第一个 SYN 包
-        {
-            let mut self_ref = rc.borrow_mut();
-            self_ref.handle_first_packet(selector, &packet);
-        }
+        // 对齐 Gnirehtet：不在 create 中调用 handle_first_packet。
+        // SYN 包的处理在第一次 send_to_network → handle_packet → handle_first_packet 中完成，
+        // 此时 ClientChannel 已由 Client 传入，可以安全回传 RST 等控制包。
+        // init 状态在 handle_first_packet 中处理时会设置 SynSent 状态。
 
         Ok(rc)
     }
@@ -210,13 +201,16 @@ impl TcpConnection {
 
     /// 从 Client 获取 ClientChannel。
     ///
-    /// 注意：这个方法借用了 Client 的 RefCell，调用者需要注意不要在
-    /// 持有 client_channel 的同时 borrow Client。
+    /// **仅在 on_ready 路径中使用**——此时 Client 的 RefCell 未被 borrow，
+    /// 可以安全地 borrow Client 来创建 ClientChannel。
+    ///
+    /// **绝不能在 send_to_network 路径中使用**——此时 Client 的 RefCell
+    /// 已被 borrow（由 Client::push_one_packet_to_network 触发），
+    /// 会导致 RefCell already borrowed panic。
     fn with_client_channel<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut Self, &mut ClientChannel) -> R,
     {
-        // 先获取 client channel 所需的数据
         let client_rc = self.client.upgrade().expect("Client 弱引用不应为空");
         let mut client = client_rc.borrow_mut();
         let mut channel = client.channel();
@@ -232,10 +226,6 @@ impl TcpConnection {
             }
             Err(_) => panic!("未处理的意外错误"),
         }
-
-        // 通知 Client 更新 interests（因为 Connection 可能修改了 Client 的 buffer）
-        let client_rc = self.client.upgrade().expect("Client 弱引用不应为空");
-        client_rc.borrow_mut().update_interests(selector);
     }
 
     /// 处理事件。
@@ -255,10 +245,8 @@ impl TcpConnection {
             if !self.closed {
                 self.update_interests(selector);
             }
-            if self.closed {
-                // 从 router 中移除自己
-                self.remove_from_router();
-            }
+            // 已关闭的连接由 Router::send_to_network（is_closed 检查）
+            // 和 clean_expired_connections 负责移除
         }
         Ok(())
     }
@@ -268,7 +256,10 @@ impl TcpConnection {
         assert_eq!(self.tcb.state, TcpState::SynSent);
         self.tcb.state = TcpState::SynReceived;
         log::debug!("{} State = {:?}", self.id.display(), self.tcb.state);
-        self.send_empty_packet_to_client(selector, 0x12); // SYN+ACK
+        // on_ready 路径，可以安全使用 with_client_channel
+        self.with_client_channel(|s, ch| {
+            s.reply_empty_packet_to_client(selector, ch, 0x12); // SYN+ACK
+        });
         self.tcb.sequence_number += Wrapping(1); // SYN 消耗一个序列号
     }
 
@@ -285,12 +276,15 @@ impl TcpConnection {
                 if self.tcb.fin_received && self.client_to_network.is_empty() {
                     // 所有数据已发送，处理延迟的 FIN
                     log::debug!("{} 无待发送数据，处理延迟 FIN", self.id.display());
+                    // on_ready 路径，可以安全使用 with_client_channel
                     self.with_client_channel(|s, ch| {
                         s.do_handle_fin(selector, ch);
                     });
                 } else {
                     log::trace!("{} 发送 ACK {}", self.id.display(), self.tcb.numbers());
-                    self.send_empty_packet_to_client(selector, 0x10); // ACK
+                    self.with_client_channel(|s, ch| {
+                        s.reply_empty_packet_to_client(selector, ch, 0x10); // ACK
+                    });
                 }
             }
             Err(err) => {
@@ -298,7 +292,9 @@ impl TcpConnection {
                     return Err(err);
                 }
                 log::error!("{} 写入失败: {:?}", self.id.display(), err.kind());
-                self.send_empty_packet_to_client(selector, 0x14); // RST+ACK
+                self.with_client_channel(|s, ch| {
+                    s.reply_empty_packet_to_client(selector, ch, 0x14); // RST+ACK
+                });
                 self.close(selector);
             }
         }
@@ -307,15 +303,15 @@ impl TcpConnection {
 
     /// 处理接收（从真实 TCP 连接读取数据，构造 IP 包回传）。
     fn process_receive(&mut self, selector: &mut Selector) -> io::Result<()> {
-        assert!(
-            self.packet_for_client_length.is_none(),
-            "存在未发送的 pending 包"
-        );
+        if self.packet_for_client_length.is_some() {
+            log::debug!("{} 有 pending 包，跳过接收", self.id.display());
+            return Ok(());
+        }
         let remaining_client_window = self.tcb.remaining_client_window();
-        assert!(
-            remaining_client_window > 0,
-            "窗口为 0 时不应调用 process_receive()"
-        );
+        if remaining_client_window == 0 {
+            log::debug!("{} 客户端窗口为 0，跳过接收", self.id.display());
+            return Ok(());
+        }
         let max_payload_length =
             cmp::min(remaining_client_window, MAX_PAYLOAD_LENGTH) as usize;
 
@@ -343,8 +339,9 @@ impl TcpConnection {
                 // 保存包数据（因为 packet 引用了 Packetizer 内部 buffer，需要拷贝出来）
                 let packet_data = packet.to_vec();
 
+                // on_ready 路径，可以安全使用 with_client_channel
                 // 尝试发送给 Client；如果缓冲区满则进入背压模式
-                match self.send_to_client(selector, &packet_data) {
+                match self.send_to_client_via_channel(selector, &packet_data) {
                     Ok(()) => {
                         log::debug!(
                             "{} 包 ({} 字节) 已发送给 Client {}",
@@ -373,7 +370,9 @@ impl TcpConnection {
                     return Err(err);
                 }
                 log::error!("{} 读取失败: {:?}", self.id.display(), err.kind());
-                self.send_empty_packet_to_client(selector, 0x14); // RST+ACK
+                self.with_client_channel(|s, ch| {
+                    s.reply_empty_packet_to_client(selector, ch, 0x14); // RST+ACK
+                });
                 self.close(selector);
             }
         }
@@ -385,7 +384,10 @@ impl TcpConnection {
     /// 如果当前是 Established，转到 FinWait1（主动关闭）；
     /// 如果是 FinWait1（同时关闭），转到 Closing。
     fn eof(&mut self, selector: &mut Selector) {
-        self.send_empty_packet_to_client(selector, 0x11); // FIN+ACK
+        // on_ready 路径，可以安全使用 with_client_channel
+        self.with_client_channel(|s, ch| {
+            s.reply_empty_packet_to_client(selector, ch, 0x11); // FIN+ACK
+        });
         self.tcb.fin_sequence_number = Some(self.tcb.sequence_number.0);
         self.tcb.sequence_number += Wrapping(1); // FIN 消耗一个序列号
         self.tcb.state = if self.tcb.state == TcpState::Established {
@@ -396,14 +398,7 @@ impl TcpConnection {
         log::debug!("{} State = {:?}", self.id.display(), self.tcb.state);
     }
 
-    /// 发送空包（仅 TCP 头）给 Android。
-    fn send_empty_packet_to_client(&mut self, selector: &mut Selector, flags: u8) {
-        self.with_client_channel(|s, ch| {
-            s.reply_empty_packet_to_client(selector, ch, flags);
-        });
-    }
-
-    /// 发送空包给 ClientChannel。
+    /// 发送空包给 ClientChannel（使用已传入的 ClientChannel）。
     fn reply_empty_packet_to_client(
         &mut self,
         selector: &mut Selector,
@@ -426,8 +421,8 @@ impl TcpConnection {
         }
     }
 
-    /// 尝试发送包给 Client。
-    fn send_to_client(
+    /// 尝试发送包给 Client（on_ready 路径使用 with_client_channel）。
+    fn send_to_client_via_channel(
         &mut self,
         selector: &mut Selector,
         ipv4_packet: &[u8],
@@ -437,17 +432,14 @@ impl TcpConnection {
         })
     }
 
-    /// 从 Router 移除自己。
-    fn remove_from_router(&self) {
-        let client_rc = self.client.upgrade().expect("Client 弱引用不应为空");
-        let mut client = client_rc.borrow_mut();
-        client.router().remove(self);
-    }
-
-    /// 处理从 Android 收到的 IP 包（仅更新状态，不回传数据）。
+    /// 处理从 Android 收到的 IP 包。
+    ///
+    /// 对齐 Gnirehtet：接受 `&mut ClientChannel`，可直接回传控制包
+    /// （SYN+ACK、FIN+ACK、RST），避免二次 borrow Client 的 RefCell。
     fn handle_packet(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &[u8],
     ) {
         let packet = Ipv4Packet::new(ipv4_packet);
@@ -457,12 +449,12 @@ impl TcpConnection {
         };
 
         if self.tcb.state == TcpState::Init {
-            self.handle_first_packet(selector, &packet);
+            self.handle_first_packet(selector, client_channel, &packet);
             return;
         }
 
         if tcp_header.is_syn() {
-            self.handle_duplicate_syn(selector, &packet);
+            self.handle_duplicate_syn(selector, client_channel, &packet);
             return;
         }
 
@@ -499,11 +491,11 @@ impl TcpConnection {
         }
 
         if tcp_header.is_ack() {
-            self.handle_ack(selector, &packet);
+            self.handle_ack(selector, client_channel, &packet);
         }
 
         if tcp_header.is_fin() {
-            self.handle_fin(selector);
+            self.handle_fin(selector, client_channel);
         }
 
         // 检查 FIN+ACK
@@ -516,9 +508,12 @@ impl TcpConnection {
     }
 
     /// 处理第一个包（必须是 SYN）。
+    ///
+    /// 对齐 Gnirehtet：接受 ClientChannel，非 SYN 首包时可回传 RST。
     fn handle_first_packet(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &Ipv4Packet,
     ) {
         let tcp_header = match ipv4_packet.transport_header() {
@@ -548,18 +543,20 @@ impl TcpConnection {
                 tcp_header.ack_number(),
                 tcp_header.flags()
             );
-            // 无法回传 RST（没有 ClientChannel），直接关闭
+            // 对齐 Gnirehtet：回传 RST 后关闭
+            self.tcb.sequence_number = Wrapping(tcp_header.ack_number());
+            self.reply_empty_packet_to_client(selector, client_channel, 0x14); // RST+ACK
             self.close(selector);
         }
     }
 
     /// 处理重复 SYN。
     ///
-    /// 在连接建立前，Android 可能重传 SYN。如果还在 SynSent 状态，
-    /// 更新序列号；如果序列号不同且已过了 SynSent，说明不是重传，关闭连接。
+    /// 对齐 Gnirehtet：接受 ClientChannel，序列号不匹配时可回传 RST。
     fn handle_duplicate_syn(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &Ipv4Packet,
     ) {
         let tcp_header = match ipv4_packet.transport_header() {
@@ -571,7 +568,9 @@ impl TcpConnection {
             self.tcb.syn_sequence_number = their_seq;
             self.tcb.acknowledgement_number = Wrapping(their_seq) + Wrapping(1);
         } else if their_seq != self.tcb.syn_sequence_number {
-            // 无法回传 RST，直接关闭
+            // 对齐 Gnirehtet：回传 RST 后关闭
+            self.tcb.sequence_number = Wrapping(tcp_header.ack_number());
+            self.reply_empty_packet_to_client(selector, client_channel, 0x14); // RST+ACK
             self.close(selector);
         }
     }
@@ -580,6 +579,7 @@ impl TcpConnection {
     fn handle_ack(
         &mut self,
         _selector: &mut Selector,
+        _client_channel: &mut ClientChannel,
         ipv4_packet: &Ipv4Packet,
     ) {
         if self.tcb.state == TcpState::SynReceived {
@@ -603,17 +603,18 @@ impl TcpConnection {
     }
 
     /// 处理 FIN（延迟处理）。
+    ///
+    /// 对齐 Gnirehtet：接受 ClientChannel，可直接调用 do_handle_fin。
     fn handle_fin(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
     ) {
         log::debug!("{} 收到来自 Client 的 FIN {}", self.id.display(), self.tcb.numbers());
         self.tcb.fin_received = true;
         if self.client_to_network.is_empty() {
             log::debug!("{} 无待发送数据，立即处理 FIN", self.id.display());
-            self.with_client_channel(|s, ch| {
-                s.do_handle_fin(selector, ch);
-            });
+            self.do_handle_fin(selector, client_channel);
         }
         // 否则等 process_send 中 buffer 清空后再处理
     }
@@ -669,18 +670,14 @@ impl TcpConnection {
     fn update_interests(&mut self, selector: &mut Selector) {
         assert!(!self.closed);
         let ready = if self.tcb.state == TcpState::SynSent {
-            // 等待连接完成
             Interest::WRITABLE
         } else {
-            let mut r = Interest::READABLE; // 始终关注 READABLE
+            let mut r = Interest::READABLE;
             if self.may_write() {
                 r |= Interest::WRITABLE;
             }
-            if !self.may_read() {
-                // 窗口为 0 或有 pending 包时不读。
-                // 但 mio 0.8 要求至少注册一个 interest，不能注册空集，
-                // 所以仍然注册 READABLE，靠 process_receive 的 assert 兜底。
-            }
+            // 窗口为 0 或有 pending 包时仍保留 READABLE（mio 要求至少一个 interest），
+            // process_receive 中会检查窗口状态并跳过读取。
             r
         };
         if self.interests != ready {
@@ -689,17 +686,6 @@ impl TcpConnection {
                 .reregister(&mut self.stream, self.token, ready)
                 .expect("无法重新注册到 poll");
         }
-    }
-
-    /// 是否可以读取网络数据。
-    fn may_read(&self) -> bool {
-        if !self.tcb.state.is_connected() || self.tcb.state.is_closed() {
-            return false;
-        }
-        if self.packet_for_client_length.is_some() {
-            return false; // 还有待发送的包
-        }
-        self.tcb.remaining_client_window() > 0
     }
 
     /// 是否可以写入网络数据。
@@ -713,12 +699,17 @@ impl Connection for TcpConnection {
         self.id.clone()
     }
 
+    /// 对齐 Gnirehtet：接受 ClientChannel 参数。
+    ///
+    /// ClientChannel 由 Client 在 push_one_packet_to_network 中提前创建，
+    /// 避免 Connection 二次 borrow Client 的 RefCell。
     fn send_to_network(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &[u8],
     ) {
-        self.handle_packet(selector, ipv4_packet);
+        self.handle_packet(selector, client_channel, ipv4_packet);
         if !self.closed {
             self.update_interests(selector);
         }

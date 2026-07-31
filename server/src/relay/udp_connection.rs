@@ -1,5 +1,5 @@
 use crate::packet::ipv4_packet::Ipv4Packet;
-use crate::relay::client::Client;
+use crate::relay::client::ClientChannel;
 use crate::relay::connection::{Connection, ConnectionId};
 use crate::relay::packetizer::Packetizer;
 use crate::relay::selector::Selector;
@@ -34,8 +34,8 @@ pub struct UdpConnection {
     packetizer: Packetizer,
     /// 空闲计时器（超时后自动关闭连接）。
     idle_since: Instant,
-    /// 所属 Client 的弱引用（用于回传数据）。
-    client: Weak<RefCell<Client>>,
+    /// 所属 Client 的弱引用（用于 on_ready 路径中回传数据）。
+    client: Weak<RefCell<crate::relay::client::Client>>,
     /// 连接是否已关闭。
     closed: bool,
 }
@@ -45,7 +45,7 @@ impl UdpConnection {
     pub fn create(
         selector: &mut Selector,
         id: ConnectionId,
-        client: Weak<RefCell<Client>>,
+        client: Weak<RefCell<crate::relay::client::Client>>,
         ipv4_packet: &[u8],
     ) -> io::Result<Rc<RefCell<Self>>> {
         // 绑定任意端口
@@ -97,10 +97,6 @@ impl UdpConnection {
             }
             Err(_) => panic!("未处理的意外 UDP 错误"),
         }
-
-        // 通知 Client 更新 interests（因为 process_receive 可能修改了 Client 的 buffer）
-        let client_rc = self.client.upgrade().expect("Client 弱引用不应为空");
-        client_rc.borrow_mut().update_interests(selector);
     }
 
     /// 处理事件。
@@ -112,6 +108,8 @@ impl UdpConnection {
     }
 
     /// 处理接收（从真实 UDP socket 读取数据，构造 IP 包回传）。
+    ///
+    /// on_ready 路径：Client 的 RefCell 未被 borrow，可以安全 borrow。
     fn process_receive(&mut self, selector: &mut Selector) -> io::Result<()> {
         let mut buf = [0u8; 65535];
         match self.socket.recv(&mut buf) {
@@ -124,7 +122,7 @@ impl UdpConnection {
                     &buf[..n],
                 );
 
-                // 发送给 Client
+                // on_ready 路径，可以安全 borrow Client
                 let client_rc = self.client.upgrade().expect("Client 弱引用不应为空");
                 let mut client = client_rc.borrow_mut();
                 let mut client_channel = client.channel();
@@ -178,9 +176,14 @@ impl Connection for UdpConnection {
         self.id.clone()
     }
 
+    /// 对齐 Gnirehtet：接受 ClientChannel 参数。
+    ///
+    /// UDP 的 send_to_network 不需要 ClientChannel（只发送数据到真实 socket，
+    /// 不回传控制包），但需要保持与 Connection trait 签名一致。
     fn send_to_network(
         &mut self,
         _selector: &mut Selector,
+        _client_channel: &mut ClientChannel,
         ipv4_packet: &[u8],
     ) {
         self.handle_packet(ipv4_packet);

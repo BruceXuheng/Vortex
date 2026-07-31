@@ -1,5 +1,6 @@
 use crate::packet::ipv4_header::Ipv4Header;
 use crate::packet::transport_header::{PROTOCOL_TCP, PROTOCOL_UDP, TransportHeader};
+use crate::relay::client::ClientChannel;
 use crate::relay::selector::Selector;
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -124,11 +125,11 @@ impl fmt::Display for ConnectionId {
 
 /// 连接 trait——TCP 和 UDP 连接的统一接口。
 ///
-/// 设计要点：
-/// - `send_to_network()` 不传 ClientChannel——Connection 只解析包和更新状态
-/// - 回传数据通过事件驱动路径完成：Connection 的 socket 收到 READABLE 事件后，
-///   在 process_receive 中读取网络数据，构造 IP 包，通过 ClientChannel 回传
-/// - 这避免了 Router 同时持有 Client 可变引用和 Connection 可变引用的借用冲突
+/// 对齐 Gnirehtet 设计：
+/// - `send_to_network()` 接受 `&mut ClientChannel`——Connection 可以直接通过
+///   ClientChannel 回传数据给 Android（SYN+ACK、FIN+ACK、RST 等控制包）
+/// - ClientChannel 在 Client 的 `push_one_packet_to_network` 中提前创建，
+///   避免 Connection 二次 borrow Client 的 RefCell 导致 panic
 pub trait Connection {
     /// 获取连接 ID。
     fn id(&self) -> ConnectionId;
@@ -139,10 +140,11 @@ pub trait Connection {
     /// 将 payload 写入 client_to_network 缓冲区。
     /// 对于 UDP：直接将 payload 发送到真实 UDP socket。
     ///
-    /// 注意：此方法不会立即回传数据给 Android，回传在 on_ready 事件中完成。
+    /// 通过 ClientChannel 可以立即回传控制包（SYN+ACK、FIN+ACK、RST）给 Android。
     fn send_to_network(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &[u8],
     );
 

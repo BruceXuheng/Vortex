@@ -80,16 +80,43 @@ impl Selector {
         self.poll.registry().reregister(source, token, interest)
     }
 
+    /// 重新注册（原始指针版本）。
+    ///
+    /// mio 0.8 的 `reregister` 要求 `&mut dyn Source`，但某些场景（如 ClientChannel）
+    /// 只持有不可变引用。这个方法接受原始指针，内部转为可变引用来调用 reregister。
+    ///
+    /// 安全性要求：
+    /// - 调用者必须保证该指针当前没有其他可变引用指向同一对象
+    /// - reregister 只修改 poll 的注册状态，不修改 stream 的内部数据
+    /// - 在 Vortex 的单线程 RC 模型下，同一时刻只有一个执行路径访问该 stream
+    pub unsafe fn reregister_raw(
+        &mut self,
+        source_ptr: *const mio::net::TcpStream,
+        token: Token,
+        interest: Interest,
+    ) -> std::io::Result<()> {
+        // SAFETY: 调用者保证指针有效且无其他可变引用。
+        // reregister 只修改 poll 注册状态，不修改 TcpStream 内部数据。
+        let source = &mut *(source_ptr as *mut mio::net::TcpStream);
+        self.poll.registry().reregister(source, token, interest)
+    }
+
     /// 延迟注销一个 handler。
     ///
     /// 不会立即移除，而是在当前事件循环轮结束后清理。
     /// 这避免了在迭代 handlers 时修改 Slab 导致的问题。
+    ///
+    /// 对齐 Gnirehtet：对 `poll.deregister` 失败做宽容处理。
+    /// 同一 fd 被多次 deregister 时，mio 可能返回错误，
+    /// 但这不影响正确性（参见 <https://github.com/Genymobile/gnirehtet/issues/136>）。
     pub fn deregister(
         &mut self,
         source: &mut impl mio::event::Source,
         token: Token,
     ) -> std::io::Result<()> {
-        self.poll.registry().deregister(source)?;
+        if let Err(err) = self.poll.registry().deregister(source) {
+            log::warn!("注销 fd 失败（可能是重复注销）: {:?}", err);
+        }
         self.tokens_to_remove.push(token);
         Ok(())
     }
@@ -112,9 +139,13 @@ impl Selector {
             handler.on_ready(self, &event);
         }
 
-        // 清理延迟注销的 handler
+        // 清理延迟注销的 handler（去重后安全移除，避免重复 deregister 导致 Slab panic）
+        self.tokens_to_remove.sort_by_key(|t| t.0);
+        self.tokens_to_remove.dedup_by_key(|t| t.0);
         for &token in &self.tokens_to_remove {
-            self.handlers.remove(token.0);
+            if self.handlers.contains(token.0) {
+                self.handlers.remove(token.0);
+            }
         }
         self.tokens_to_remove.clear();
     }

@@ -1,5 +1,5 @@
 use crate::packet::ipv4_packet::Ipv4Packet;
-use crate::relay::client::Client;
+use crate::relay::client::{Client, ClientChannel};
 use crate::relay::connection::{Connection, ConnectionId};
 use crate::relay::selector::Selector;
 use std::cell::RefCell;
@@ -9,10 +9,9 @@ use std::rc::{Rc, Weak};
 /// 五元组路由器。
 ///
 /// 对齐 Gnirehtet 设计：
-/// - 持有 `Weak<RefCell<Client>>`，不持有 CloseListener
-/// - Connection 关闭时通过 client 弱引用自行从 router 移除
-/// - `send_to_network()` 不传 ClientChannel——Connection 只解析包和更新状态，
-///   回传数据通过 on_ready 路径完成
+/// - 持有 `Weak<RefCell<Client>>`
+/// - 已关闭的连接在 `send_to_network`（is_closed 检查）和 `clean_expired_connections` 中移除
+/// - `send_to_network()` 传入 ClientChannel——Connection 可直接回传控制包
 pub struct Router {
     client: Weak<RefCell<Client>>,
     /// 连接列表（通常每个客户端只有少量连接，Vec 比 HashMap 更高效）。
@@ -35,13 +34,12 @@ impl Router {
 
     /// 将 IP 包路由到对应的连接。
     ///
+    /// 对齐 Gnirehtet：传入 ClientChannel，让 Connection 可直接回传控制包。
     /// 如果没有找到已有连接，则创建新连接。
-    /// 注意：不传 ClientChannel——Connection 只解析包和更新状态，
-    /// 回传数据通过 on_ready 事件路径完成（Connection 收到 READABLE 事件后
-    /// 读取网络数据，构造 IP 包，通过 ClientChannel 回传）。
     pub fn send_to_network(
         &mut self,
         selector: &mut Selector,
+        client_channel: &mut ClientChannel,
         ipv4_packet: &[u8],
     ) {
         let packet = Ipv4Packet::new(ipv4_packet);
@@ -55,7 +53,7 @@ impl Router {
                 let closed = {
                     let connection_ref = &self.connections[index];
                     let mut connection = connection_ref.borrow_mut();
-                    connection.send_to_network(selector, ipv4_packet);
+                    connection.send_to_network(selector, client_channel, ipv4_packet);
                     connection.is_closed()
                 };
                 if closed {
@@ -68,9 +66,14 @@ impl Router {
     }
 
     /// 验证 IP 包是否有效。
+    ///
+    /// 对齐 Gnirehtet：除了检查 IP 版本和长度，还必须能解析传输层头。
+    /// 没有传输层头的包（如 ICMP、分片包）无法路由，应直接丢弃。
     fn is_valid(packet: &Ipv4Packet) -> bool {
         let header = packet.ipv4_header();
-        header.version() == 4 && header.total_length() as usize <= packet.raw().len()
+        header.version() == 4
+            && header.total_length() as usize <= packet.raw().len()
+            && packet.transport_header().is_some()
     }
 
     /// 查找或创建连接。
@@ -128,15 +131,6 @@ impl Router {
             .position(|conn| &conn.borrow().id() == id)
     }
 
-    /// 移除指定连接（由 Connection 关闭时调用）。
-    pub fn remove(&mut self, connection: &dyn Connection) {
-        let id = connection.id();
-        if let Some(index) = self.connections.iter().position(|c| c.borrow().id() == id) {
-            log::debug!("连接自行从路由器移除: {}", id.display());
-            self.connections.swap_remove(index);
-        }
-    }
-
     /// 清理所有连接。
     pub fn clear(&mut self, selector: &mut Selector) {
         for connection in &mut self.connections {
@@ -145,12 +139,16 @@ impl Router {
         self.connections.clear();
     }
 
-    /// 清理过期连接。
+    /// 清理过期和已关闭的连接。
     pub fn clean_expired_connections(&mut self, selector: &mut Selector) {
         for i in (0..self.connections.len()).rev() {
-            let expired = {
+            let should_remove = {
                 let mut connection = self.connections[i].borrow_mut();
-                if connection.is_expired() {
+                if connection.is_closed() {
+                    // 已关闭的连接直接移除（不需要再调用 close）
+                    log::debug!("清理已关闭的连接: {}", connection.id().display());
+                    true
+                } else if connection.is_expired() {
                     log::debug!("从路由器移除过期连接: {}", connection.id().display());
                     connection.close(selector);
                     true
@@ -158,7 +156,7 @@ impl Router {
                     false
                 }
             };
-            if expired {
+            if should_remove {
                 self.connections.swap_remove(i);
             }
         }
