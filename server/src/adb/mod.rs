@@ -148,6 +148,7 @@ impl Adb {
             .arg("start")
             .arg("-a")
             .arg("com.vortex.action.START")
+            .arg("-n")
             .arg(&component);
 
         // 传递 DNS 服务器列表（--esa dnsServers 8.8.8.8,1.1.1.1）
@@ -159,15 +160,26 @@ impl Adb {
             cmd.arg("--esa").arg("routes").arg(rt);
         }
 
-        let status = cmd
-            .status()
+        let output = cmd
+            .output()
             .map_err(|e| format!("启动 VPN 失败: {e}"))?;
 
-        if status.success() {
-            log::info!("VPN 服务已启动 (package={package})");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            log::info!("VPN 启动命令已发送 (package={package})");
+            if !stdout.trim().is_empty() {
+                log::info!("am start 输出: {}", stdout.trim());
+            }
             Ok(())
         } else {
-            Err(format!("启动 VPN 失败，退出码: {:?}", status.code()))
+            Err(format!(
+                "启动 VPN 失败，退出码: {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            ))
         }
     }
 
@@ -179,21 +191,33 @@ impl Adb {
         let package = self.detect_package();
         let component = format!("{package}/{ACTIVITY_CLASS}");
 
-        let status = self.command()
+        let output = self.command()
             .arg("shell")
             .arg("am")
             .arg("start")
             .arg("-a")
             .arg("com.vortex.action.STOP")
+            .arg("-n")
             .arg(&component)
-            .status()
+            .output()
             .map_err(|e| format!("停止 VPN 失败: {e}"))?;
 
-        if status.success() {
-            log::info!("VPN 服务已停止 (package={package})");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if output.status.success() {
+            log::info!("VPN 停止命令已发送 (package={package})");
+            if !stdout.trim().is_empty() {
+                log::info!("am start 输出: {}", stdout.trim());
+            }
             Ok(())
         } else {
-            Err(format!("停止 VPN 失败，退出码: {:?}", status.code()))
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "停止 VPN 失败，退出码: {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            ))
         }
     }
 }
