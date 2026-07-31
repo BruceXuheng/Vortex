@@ -21,7 +21,7 @@ fn run_command(command: &Commands, adb: &Adb) -> Result<(), String> {
     match command {
         Commands::Run => run_all(adb),
         Commands::Relay => run_relay(),
-        Commands::Install => adb.install("vortex_app.apk"),
+        Commands::Install => run_install(adb),
         Commands::Start => run_start(adb),
         Commands::Stop => run_stop(adb),
         Commands::Tunnel => adb.reverse(),
@@ -34,8 +34,8 @@ fn run_command(command: &Commands, adb: &Adb) -> Result<(), String> {
 fn run_all(adb: &Adb) -> Result<(), String> {
     log::info!("=== Vortex 一键启动 ===");
 
-    // 1. 安装 APK
-    adb.install("vortex_app.apk")?;
+    // 1. 安装 APK（从嵌入的二进制数据中提取）
+    run_install(adb)?;
 
     // 2. 建立反向隧道
     adb.reverse()?;
@@ -45,6 +45,12 @@ fn run_all(adb: &Adb) -> Result<(), String> {
 
     // 4. 启动 Relay 服务器
     run_relay()
+}
+
+/// 安装嵌入的 APK 到设备。
+fn run_install(adb: &Adb) -> Result<(), String> {
+    let apk_path = vortex::apk::extract().map_err(|e| e.to_string())?;
+    adb.install(apk_path.to_str().ok_or("APK 路径无效")?)
 }
 
 /// `vortex start`：建隧道 + 启动 VPN。
