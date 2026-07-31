@@ -22,10 +22,14 @@ fn main() {
 /// 根据子命令执行对应操作。
 fn run_command(command: &Commands, adb: &Adb) -> Result<(), String> {
     match command {
-        Commands::Run => run_all(adb),
+        Commands::Run { dns_servers, routes } => {
+            run_all(adb, dns_servers.as_deref(), routes.as_deref())
+        }
         Commands::Relay => run_relay(),
         Commands::Install => run_install(adb),
-        Commands::Start => run_start(adb),
+        Commands::Start { dns_servers, routes } => {
+            run_start(adb, dns_servers.as_deref(), routes.as_deref())
+        }
         Commands::Stop => run_stop(adb),
         Commands::Tunnel => adb.reverse(),
     }
@@ -34,7 +38,7 @@ fn run_command(command: &Commands, adb: &Adb) -> Result<(), String> {
 /// `vortex run`：一键运行全部流程。
 ///
 /// 顺序：安装 APK → 建隧道 → 启动 VPN → 启动 Relay
-fn run_all(adb: &Adb) -> Result<(), String> {
+fn run_all(adb: &Adb, dns_servers: Option<&str>, routes: Option<&str>) -> Result<(), String> {
     log::info!("=== Vortex 一键启动 ===");
 
     // 1. 安装 APK（从嵌入的二进制数据中提取）
@@ -43,8 +47,8 @@ fn run_all(adb: &Adb) -> Result<(), String> {
     // 2. 建立反向隧道
     adb.reverse()?;
 
-    // 3. 启动 VPN
-    adb.start_vpn()?;
+    // 3. 启动 VPN（传递 DNS 和路由参数）
+    adb.start_vpn(dns_servers, routes)?;
 
     // 4. 启动 Relay 服务器
     run_relay()
@@ -57,9 +61,9 @@ fn run_install(adb: &Adb) -> Result<(), String> {
 }
 
 /// `vortex start`：建隧道 + 启动 VPN。
-fn run_start(adb: &Adb) -> Result<(), String> {
+fn run_start(adb: &Adb, dns_servers: Option<&str>, routes: Option<&str>) -> Result<(), String> {
     adb.reverse()?;
-    adb.start_vpn()
+    adb.start_vpn(dns_servers, routes)
 }
 
 /// `vortex stop`：停止 VPN + 移除隧道。

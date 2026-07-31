@@ -127,20 +127,39 @@ impl Adb {
     /// 通过 `am start` 发送 `com.vortex.action.START` Intent 到 Activity，
     /// 由 Activity 内部启动 VortexVpnService。
     ///
+    /// 可选参数通过 `--esa`（extended string array）传递：
+    /// - `dns_servers`：逗号分隔的 DNS 服务器列表
+    /// - `routes`：逗号分隔的 CIDR 路由规则列表
+    ///
     /// 不能直接用 `am startservice` 启动 VpnService：
     /// VpnService 声明了 `BIND_VPN_SERVICE` 系统权限保护，
     /// ADB shell 没有该权限，跨 UID 调用会被拒绝。
-    pub fn start_vpn(&self) -> Result<(), String> {
+    pub fn start_vpn(
+        &self,
+        dns_servers: Option<&str>,
+        routes: Option<&str>,
+    ) -> Result<(), String> {
         let package = self.detect_package();
         let component = format!("{package}/{ACTIVITY_CLASS}");
 
-        let status = self.command()
-            .arg("shell")
+        let mut cmd = self.command();
+        cmd.arg("shell")
             .arg("am")
             .arg("start")
             .arg("-a")
             .arg("com.vortex.action.START")
-            .arg(&component)
+            .arg(&component);
+
+        // 传递 DNS 服务器列表（--esa dnsServers 8.8.8.8,1.1.1.1）
+        if let Some(dns) = dns_servers {
+            cmd.arg("--esa").arg("dnsServers").arg(dns);
+        }
+        // 传递路由规则列表（--esa routes 192.168.0.0/16,10.0.0.0/8）
+        if let Some(rt) = routes {
+            cmd.arg("--esa").arg("routes").arg(rt);
+        }
+
+        let status = cmd
             .status()
             .map_err(|e| format!("启动 VPN 失败: {e}"))?;
 
