@@ -15,6 +15,7 @@ import com.vortex.service.VortexVpnService
 import com.vortex.service.VpnConfiguration
 import com.vortex.ui.navigation.VortexRoutes
 import com.vortex.ui.screens.home.HomeScreen
+import com.vortex.ui.screens.home.VpnViewModel
 import com.vortex.ui.screens.logdetail.LogDetailScreen
 import com.vortex.ui.theme.Vortex_appTheme
 import java.net.InetAddress
@@ -23,15 +24,11 @@ import java.net.InetAddress
  * 应用主 Activity，承载 Navigation 导航图。
  *
  * 同时作为 ADB 远程启动 VPN 的入口：接收 `com.vortex.action.START` /
- * `com.vortex.action.STOP` Intent，统一委托给 [com.vortex.ui.screens.home.VpnViewModel] 处理。
+ * `com.vortex.action.STOP` Intent，通过 [VpnViewModel.dispatch] 委托给 ViewModel 处理。
  */
 class MainActivity : ComponentActivity() {
 
-    /** 由 HomeScreen 设置，将 Intent 事件转发给 ViewModel。 */
-    var onIntentAction: ((action: String?, config: VpnConfiguration?) -> Unit)? = null
-
-    /** handler 注册前缓存的 pending action，注册后自动补发。 */
-    private var pendingAction: Pair<String?, VpnConfiguration?>? = null
+    private val viewModel = VpnViewModel()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -46,14 +43,9 @@ class MainActivity : ComponentActivity() {
                 ) {
                     composable(VortexRoutes.HOME) {
                         HomeScreen(
+                            viewModel = viewModel,
                             onNavigateToLog = {
                                 navController.navigate(VortexRoutes.LOG_DETAIL_PAGE)
-                            },
-                            onActionReady = { handler ->
-                                onIntentAction = handler
-                                // handler 就绪后补发缓存的 pending action
-                                pendingAction?.let { handler(it.first, it.second) }
-                                pendingAction = null
                             }
                         )
                     }
@@ -76,10 +68,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 处理 Activity 启动 Intent，统一委托给 ViewModel。
+     * 处理 Activity 启动 Intent，通过 [VpnViewModel.dispatch] 委托给 ViewModel。
      *
-     * 若 handler 尚未注册（首次 onCreate 时 LaunchedEffect 还未执行），
-     * 将 action 缓存到 [pendingAction]，等 handler 就绪后自动补发。
+     * dispatch 写入 SharedFlow，ViewModel 自行 coroutine 消费执行，
+     * 无需关心 UI 是否已组合完成，彻底消除时序问题。
      *
      * - `ACTION_STOP_VPN`：停止 VPN
      * - `ACTION_START_VPN`：提取 extras 参数后启动 VPN
@@ -87,17 +79,17 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleIntent(intent: Intent?) {
         val action = intent?.action
-        val pair = when (action) {
-            VortexVpnService.ACTION_STOP_VPN -> action to null
-            VortexVpnService.ACTION_START_VPN -> action to createConfig(intent)
-            else -> VortexVpnService.ACTION_START_VPN to VpnConfiguration()
-        }
-
-        if (onIntentAction != null) {
-            onIntentAction!!.invoke(pair.first, pair.second)
-        } else {
-            // handler 未就绪，缓存等待补发
-            pendingAction = pair
+        when (action) {
+            VortexVpnService.ACTION_STOP_VPN -> {
+                viewModel.dispatch(action)
+            }
+            VortexVpnService.ACTION_START_VPN -> {
+                viewModel.dispatch(action, createConfig(intent))
+            }
+            else -> {
+                // 默认启动（桌面图标等），自动连接 VPN
+                viewModel.dispatch(VortexVpnService.ACTION_START_VPN, VpnConfiguration())
+            }
         }
     }
 

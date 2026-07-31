@@ -7,11 +7,16 @@ import android.content.IntentFilter
 import android.net.VpnService
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.vortex.service.VortexVpnService
 import com.vortex.service.VpnConfiguration
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * VPN 连接状态管理 ViewModel。
@@ -22,6 +27,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * - App 默认自动连接
  *
  * 通信方式：
+ * - 外部 → ViewModel：通过 [dispatch] 写入 [actionFlow]
  * - ViewModel → Service：通过 [Context.startForegroundService] 发送 Action
  * - Service → ViewModel：通过 BroadcastReceiver 接收状态广播
  */
@@ -41,6 +47,14 @@ class VpnViewModel : ViewModel() {
         ERROR
     }
 
+    /**
+     * 外部发来的 VPN 操作指令。
+     *
+     * @param action Action 常量（[VortexVpnService.ACTION_START_VPN] 等）
+     * @param config VPN 配置，仅对 START 有意义
+     */
+    data class VpnAction(val action: String?, val config: VpnConfiguration? = null)
+
     private val _vpnState = MutableStateFlow(VpnState.DISCONNECTED)
 
     /** 当前 VPN 连接状态。 */
@@ -59,16 +73,48 @@ class VpnViewModel : ViewModel() {
     /** 等待 VPN 授权时暂存的配置。 */
     private var pendingConfig: VpnConfiguration? = null
 
+    private val _actionFlow = MutableSharedFlow<VpnAction>(extraBufferCapacity = 16)
+
+    /** 外部写入的 VPN 操作指令流，ViewModel 自行消费。 */
+    val actionFlow: SharedFlow<VpnAction> = _actionFlow.asSharedFlow()
+
+    /** 等待 context 就绪的缓存 action。 */
+    private var queuedAction: VpnAction? = null
+
     private var receiver: BroadcastReceiver? = null
     private var receiverContext: Context? = null
 
+    init {
+        // ViewModel 自行消费 actionFlow，彻底消除回调时序问题
+        viewModelScope.launch {
+            actionFlow.collect { action ->
+                // context 可能还没准备好，缓存等 executeAction 调用时处理
+                queuedAction = action
+                tryExecuteQueuedAction()
+            }
+        }
+    }
+
     /**
-     * 绑定 Service 状态广播。
+     * 提交 VPN 操作指令。
+     *
+     * 任何时刻都可安全调用，无需关心 UI 是否已就绪。
+     *
+     * @param action Action 常量
+     * @param config VPN 配置
+     */
+    fun dispatch(action: String?, config: VpnConfiguration? = null) {
+        _actionFlow.tryEmit(VpnAction(action, config))
+    }
+
+    /**
+     * 绑定 Service 状态广播，并提供 context 用于后续 VPN 操作。
      *
      * 注册 BroadcastReceiver 监听 [VortexVpnService] 发出的状态变更广播，
-     * 注册后主动查询 [VortexVpnService.isRunning] 同步当前状态。
+     * 注册后主动查询 [VortexVpnService.isRunning] 同步当前状态，
+     * 并尝试执行缓存的 pending action。
      *
-     * @param context 用于注册 BroadcastReceiver 的 Context
+     * @param context 用于注册 BroadcastReceiver 和启动 Service 的 Context
      */
     fun bindServiceState(context: Context) {
         receiverContext = context
@@ -102,6 +148,9 @@ class VpnViewModel : ViewModel() {
             _vpnState.value = VpnState.CONNECTED
             _isBusy.value = false
         }
+
+        // context 就绪后，执行缓存的操作
+        tryExecuteQueuedAction()
     }
 
     /**
@@ -175,6 +224,17 @@ class VpnViewModel : ViewModel() {
             putExtra(VortexVpnService.EXTRA_VPN_CONFIGURATION, config)
         }
         context.startForegroundService(intent)
+    }
+
+    /** 尝试执行缓存的操作，需要 receiverContext 已就绪。 */
+    private fun tryExecuteQueuedAction() {
+        val action = queuedAction ?: return
+        val ctx = receiverContext ?: return
+        queuedAction = null
+        when (action.action) {
+            VortexVpnService.ACTION_STOP_VPN -> stopVpn(ctx)
+            else -> startVpn(ctx, action.config ?: VpnConfiguration())
+        }
     }
 
     override fun onCleared() {
