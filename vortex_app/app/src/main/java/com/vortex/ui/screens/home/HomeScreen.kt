@@ -31,6 +31,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.vortex.service.VpnConfiguration
+import com.vortex.service.VortexVpnService
 import com.vortex.ui.theme.Vortex_appTheme
 
 /**
@@ -44,7 +46,9 @@ import com.vortex.ui.theme.Vortex_appTheme
 fun HomeScreen(
     modifier: Modifier = Modifier,
     viewModel: VpnViewModel = viewModel(),
-    onNavigateToLog: () -> Unit = {}
+    onNavigateToLog: () -> Unit = {},
+    /** 注册 Intent 动作处理器，由 MainActivity 调用以转发 ADB/自动连接事件。 */
+    onActionReady: ((handler: (String?, VpnConfiguration?) -> Unit) -> Unit)? = null
 ) {
     val vpnState by viewModel.vpnState.collectAsState()
     val isBusy by viewModel.isBusy.collectAsState()
@@ -67,6 +71,16 @@ fun HomeScreen(
 
     LaunchedEffect(Unit) {
         viewModel.bindServiceState(context)
+    }
+
+    // 注册 Intent 动作处理器，Activity 通过此回调转发 ADB/自动连接事件到 ViewModel
+    LaunchedEffect(onActionReady) {
+        onActionReady?.invoke { action, config ->
+            when (action) {
+                VortexVpnService.ACTION_STOP_VPN -> viewModel.stopVpn(context)
+                else -> viewModel.startVpn(context, config ?: VpnConfiguration())
+            }
+        }
     }
 
     Column(
