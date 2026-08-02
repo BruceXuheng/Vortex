@@ -92,7 +92,11 @@ class VortexVpnService : VpnService() {
                     startVpn(config ?: VpnConfiguration())
                 }
             }
-            ACTION_STOP_VPN -> closeVpn()
+            ACTION_STOP_VPN -> {
+                // closeVpn 涉及网络 I/O（wakeUpReadWorkaround 的 DatagramSocket.send），
+                // 主线程执行会触发 NetworkOnMainThreadException，必须在后台线程关闭
+                Thread { closeVpn() }.start()
+            }
         }
         return START_NOT_STICKY
     }
@@ -253,8 +257,10 @@ class VortexVpnService : VpnService() {
 
     /** 关闭 VPN：停止转发、关闭接口、移除通知、广播状态。 */
     private fun closeVpn() {
-        if (!running) return
-        isRunning = false
+        synchronized(this) {
+            if (!running) return
+            isRunning = false
+        }
 
         try {
             packetForwarder?.stop()
